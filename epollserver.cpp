@@ -7,6 +7,8 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <errno.h>
 
 class TcpServer
 {
@@ -57,7 +59,7 @@ public:
         // 将监听套接字加入到epoll树上
         struct epoll_event ev;
         ev.data.fd = m_lfd;
-        ev.events = EPOLLIN;
+        ev.events = EPOLLIN | EPOLLET;
         if (epoll_ctl(m_epfd, EPOLL_CTL_ADD, m_lfd, &ev) == -1)
         {
             perror("epoll_ctl error");
@@ -111,6 +113,10 @@ private:
     {
 
         int cfd = accept(m_lfd, NULL, NULL);
+        // 设置非阻塞属性
+        int flag = fcntl(cfd, F_GETFL);
+        fcntl(cfd, F_SETFL, flag | O_NONBLOCK);
+
         if (cfd == -1)
         {
             perror("accept error");
@@ -119,7 +125,7 @@ private:
         // 将新连接加入到epoll实例
         struct epoll_event ev;
         ev.data.fd = cfd;
-        ev.events = EPOLLIN;
+        ev.events = EPOLLIN | EPOLLET;
         if (epoll_ctl(m_epfd, EPOLL_CTL_ADD, cfd, &ev) == -1) // cfd ev
         {
             perror("epoll_ctl error");
@@ -134,33 +140,47 @@ private:
     void recvData(int fd)
     {
 
-        char buf[1024] = {0};
-        int len = recv(fd, buf, sizeof(buf), 0);
-        if (len == 0)
+        char buf[5] = {0};
+        while (1)
         {
-            std::cout << "客户端关闭连接, fd = " << fd << std::endl;
-            epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, NULL); // 从epoll树删除
-            close(fd);                                  // 关闭文件描述符
-        }
-        else if (len == -1)
-        {
-            perror("recv error");
-            // 如果是资源暂时不可用(EAGAIN)，不算严重错误，但在阻塞模式下通常不会发生
-            // 其他错误建议关闭连接
-            epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, NULL);
-            close(fd);
-        }
+            int len = recv(fd, buf, sizeof(buf), 0);
+            if (len == 0)
+            {
+                std::cout << "客户端关闭连接, fd = " << fd << std::endl;
+                epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, NULL); // 从epoll树删除
+                close(fd);                                  // 关闭文件描述符
+                break;
+            }
+            else if (len == -1)
+            {
+                if (errno == EAGAIN)
+                {
+                    std::cout << "数据已经接收完毕" << std::endl;
+                    break;
+                }
+                else
+                {
+                    perror("recv error");
+                    // 如果是资源暂时不可用(EAGAIN)，不算严重错误，但在阻塞模式下通常不会发生
+                    // 其他错误建议关闭连接
+                    epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, NULL);
+                    exit(1);
+                }
+            }
 
-        std::cout << "Thread  " << std::this_thread::get_id() << "  Recv: " << buf << std::endl;
-        for (int i = 0; i < len; i++)
-        {
-            buf[i] = toupper(buf[i]);
-        }
-        std::cout << "after buf = " << buf << std::endl;
-        int ret = send(fd, buf, len, 0);
-        if (ret == -1)
-        {
-            perror("send error");
+            std::cout << "Thread  " << std::this_thread::get_id() << "  Recv: " << buf << std::endl;
+            for (int i = 0; i < len; i++)
+            {
+                buf[i] = toupper(buf[i]);
+            }
+            // write(STDOUT_FILENO, buf, len);
+            std::cout << "after buf = " << buf << std::endl;
+            int ret = send(fd, buf, len, 0);
+            if (ret == -1)
+            {
+                perror("send error");
+                exit(1);
+            }
         }
     }
 
